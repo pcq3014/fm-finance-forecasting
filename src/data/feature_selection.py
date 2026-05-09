@@ -61,6 +61,17 @@ EXCLUDE_COLS = {
     "regime_hmm", "regime_vol",  # categorical, handle bo regime encoder rieng
 }
 
+# Force-include: cac slow-moving macro features luon giu cho Regime Encoder.
+# Ly do: PMI/IBOR/USD/VND la slow signals -> khong pass daily selection,
+# nhung Regime Encoder dung 60-day window -> can chung de capture macro context.
+# Reference cho paper: Section 3.4 + 4.5 (Regime Encoder input).
+FORCE_INCLUDE_FOR_REGIME = [
+    "pmi_norm",      # PMI deviation from neutral 50
+    "ibor_rate",     # SBV refinancing rate (step function)
+    "ibor_event",    # Binary: 1 = SBV changed rate today
+    "usdvnd_dev",    # USD/VND deviation from 1yr trend
+]
+
 
 # =============================================================
 # Load data + setup target
@@ -316,35 +327,56 @@ def step4_stability(train: pd.DataFrame, report: pd.DataFrame) -> pd.DataFrame:
 # Final selection
 # =============================================================
 
-def final_select(report: pd.DataFrame, n_final: int = N_FINAL) -> list:
+def final_select(report: pd.DataFrame, n_final: int = N_FINAL) -> tuple:
     """
-    Combine SHAP importance + stability score thanh final ranking.
-    Final score = rank(SHAP) + rank(stability) (lower = better)
+    Combine SHAP importance + stability -> final ranking.
+    Tra ve:
+      - selected_predictor: top features cho Main Predictor (data-driven)
+      - selected_regime: predictor + force-include macro cho Regime Encoder
     """
     print("\n" + "=" * 60)
-    print(f"FINAL SELECTION — Top {n_final} features")
+    print(f"FINAL SELECTION — Top {n_final} features for Predictor")
     print("=" * 60)
 
     # Chi xet features pass step 2 (qua MI)
     candidates = report[report["mi_pass"]].copy()
 
-    # Composite ranking: average of normalized SHAP + stability
+    # Composite ranking: average rank
     candidates["shap_rank"]  = candidates["shap_importance"].rank(ascending=False)
     candidates["stab_rank"]  = candidates["stability_score"].rank(ascending=False)
     candidates["final_rank"] = (candidates["shap_rank"] + candidates["stab_rank"]) / 2
 
     candidates = candidates.sort_values("final_rank")
-    selected = candidates.head(n_final)["feature"].tolist()
+    selected_predictor = candidates.head(n_final)["feature"].tolist()
 
-    print("\nFinal selection (combined SHAP + Stability):")
+    print("\nMain Predictor features (data-driven):")
     cols_to_show = ["feature", "spearman_corr", "mi_score", "shap_importance",
                     "stability_score", "final_rank"]
     print(candidates.head(n_final)[cols_to_show].round(4).to_string(index=False))
 
-    # Mark selected in report
-    report["selected"] = report["feature"].isin(selected)
+    # Force-include cho Regime Encoder
+    print(f"\nForce-include for Regime Encoder (slow-moving macro):")
+    forced_added = []
+    for f in FORCE_INCLUDE_FOR_REGIME:
+        if f not in selected_predictor:
+            forced_added.append(f)
+            spearman = report.loc[report["feature"] == f, "spearman_corr"].values
+            sp_str = f"spearman={spearman[0]:+.4f}" if len(spearman) > 0 else "missing in report"
+            print(f"  + {f:20s} ({sp_str})")
+        else:
+            print(f"  = {f:20s} (already in predictor)")
 
-    return selected, report
+    selected_regime = selected_predictor + forced_added
+
+    # Mark in report
+    report["selected_predictor"] = report["feature"].isin(selected_predictor)
+    report["force_included"]     = report["feature"].isin(forced_added)
+    report["selected_regime"]    = report["feature"].isin(selected_regime)
+
+    print(f"\nTotal: {len(selected_predictor)} predictor + {len(forced_added)} forced "
+          f"= {len(selected_regime)} for Regime Encoder")
+
+    return selected_predictor, selected_regime, report
 
 
 # =============================================================
@@ -366,29 +398,47 @@ def main():
     report = step3_shap_or_importance(train, report)
     report = step4_stability(train, report)
 
-    # Final
-    selected, report = final_select(report, N_FINAL)
+    # Final selection (predictor + regime encoder)
+    selected_predictor, selected_regime, report = final_select(report, N_FINAL)
 
     # Save report
-    report = report.sort_values("final_rank" if "final_rank" in report.columns else "spearman_pval")
+    if "final_rank" in report.columns:
+        report = report.sort_values("final_rank")
+    else:
+        report = report.sort_values("spearman_pval")
     report.to_csv(REPORT_PATH, index=False)
     print(f"\nReport saved: {REPORT_PATH}")
 
-    # Save selected features list + panel data
+    # Save panel data: chua DU cac features can thiet cho ca 2 components
     print(f"\n{'=' * 60}")
-    print(f"SELECTED ({len(selected)} features):")
-    for i, f in enumerate(selected, 1):
-        print(f"  {i}. {f}")
+    print(f"SUMMARY:")
+    print(f"  Main Predictor uses : {len(selected_predictor)} features (data-driven)")
+    print(f"  Regime Encoder uses : {len(selected_regime)} features (predictor + force-included macro)")
+    print(f"  Panel data saved    : {len(selected_regime)} feature cols")
 
-    # Save panel data voi cac cot duoc chon
     full_df = pd.read_csv(FEAT_PATH, parse_dates=["Date"])
-    keep_cols = ["Date", "ticker", "Open", "High", "Low", "Close", "Volume",
-                 "regime_hmm", "regime_vol"] + selected
+    keep_cols = (
+        ["Date", "ticker", "Open", "High", "Low", "Close", "Volume",
+         "regime_hmm", "regime_vol"]
+        + selected_regime
+    )
     keep_cols = [c for c in keep_cols if c in full_df.columns]
     out = full_df[keep_cols]
     out.to_csv(SEL_PATH, index=False)
     print(f"\nPanel data saved: {SEL_PATH}")
     print(f"Shape: {out.shape}")
+
+    # Print 2 lists ro rang de copy vao LEAF code
+    print(f"\n{'-' * 60}")
+    print("PREDICTOR_FEATURES = [")
+    for f in selected_predictor:
+        print(f"    '{f}',")
+    print("]")
+    print("\nREGIME_FEATURES = [  # = predictor + force-included slow macro")
+    for f in selected_regime:
+        marker = "  # forced" if f not in selected_predictor else ""
+        print(f"    '{f}',{marker}")
+    print("]")
 
 
 if __name__ == "__main__":

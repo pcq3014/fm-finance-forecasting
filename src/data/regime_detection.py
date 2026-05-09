@@ -129,18 +129,19 @@ def label_states(port: pd.DataFrame, states: np.ndarray) -> dict:
             vol = port["port_ret"].values[mask].std()
             state_ret[s] = ret
             state_vol[s] = vol
-            # Phân loại dựa trên Return/Vol (Sharpe-like ratio)
+            # Tính Sharpe (Dùng để in report)
             state_sharpe[s] = ret / (vol + 1e-6)
 
-    # Sort theo Sharpe (ret/vol): Bull=cao nhat, Bear=thap nhat
-    sorted_states = sorted(state_sharpe.keys(), key=lambda s: state_sharpe[s], reverse=True)
+    # Sort theo Lợi nhuận (Return) để tránh bẫy toán học khi chia số âm.
+    # Bull = Lợi nhuận max | Bear = Lợi nhuận min (âm nhất)
+    sorted_states = sorted(state_ret.keys(), key=lambda s: state_ret[s], reverse=True)
     label_map = {
         sorted_states[0]: "Bull",
         sorted_states[1]: "Sideways",
         sorted_states[2]: "Bear",
     }
 
-    print(f"\n  State labeling (Sharpe-sorted: Bull > Sideways > Bear):")
+    print(f"\n  State labeling (Return-sorted: Bull > Sideways > Bear):")
     for s in sorted_states:
         print(f"    State {s} -> {label_map[s]:8s} | "
               f"ret={state_ret[s]:+.4f} | vol={state_vol[s]:.4f} | "
@@ -162,7 +163,8 @@ def validate_economic(label_map: dict, state_ret: dict, state_vol: dict, states:
 
     n = len(states)
     checks = {
-        "Bull Sharpe > Sideways Sharpe": state_ret[bull_s] / (state_vol[bull_s] + 1e-6) > state_ret[side_s] / (state_vol[side_s] + 1e-6),
+        "Bull return > 0 (Dương)"      : state_ret[bull_s] > 0,
+        "Bear return < 0 (Âm)"         : state_ret[bear_s] < 0,
         "Bull vol < Bear vol"          : state_vol[bull_s] < state_vol[bear_s],
         "Bear vol > Sideways vol"      : state_vol[bear_s] > state_vol[side_s],
         "Bull > 20% sample"            : (states == bull_s).sum() / n > 0.20,
@@ -241,19 +243,9 @@ def main():
     print("\n[4/5] Labeling states...")
     label_map, state_ret, state_vol = label_states(port, states_arr)
 
-    # Map states -> labels
+    # Map states -> labels (raw Viterbi, no post-smoothing)
     port["regime_hmm_raw"] = states_arr
-    port["regime_hmm"] = pd.Series(states_arr, index=port.index).map(label_map)
-
-    # Smooth: rolling mode 5 ngày (chống nhiễu chuyển trạng thái liên tục)
-    # Phải làm trên numeric (state index) trước, rồi map sang label sau
-    smoothed_states = (
-        pd.Series(states_arr, index=port.index)
-        .rolling(5, min_periods=1)
-        .apply(lambda x: pd.Series(x).mode().iloc[0])
-        .astype(int)
-    )
-    port["regime_hmm"] = smoothed_states.map(label_map)
+    port["regime_hmm"] = pd.Series([label_map[s] for s in states_arr], index=port.index)
 
     # Economic validation
     valid = validate_economic(label_map, state_ret, state_vol, states_arr)
