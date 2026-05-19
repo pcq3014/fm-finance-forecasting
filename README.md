@@ -19,7 +19,7 @@ LEAF beats every baseline on every metric on the full test set (2024-01-03 → 2
 | Equal-Weight (3 FM) | 0.02271 | 0.01411 | −0.0698 | 0.4558 |
 | Moirai-2 | 0.02469 | 0.01520 | −0.0707 | 0.4563 |
 
-How LEAF achieves this is explained in [`LEAF_IMPROVEMENT_REPORT.md`](LEAF_IMPROVEMENT_REPORT.md). The short version: dynamic per-sample routing via a regime encoder + 17 auxiliary features (FM disagreement, error correlation, ticker characteristics) + per-FM affine calibration + entropy-floor regularization + 5-seed ensemble.
+How LEAF achieves this is explained in [`MACRO_PROCESSING_GUIDE.md`](MACRO_PROCESSING_GUIDE.md) for the data pipeline, and in the code comments of [`scripts/leaf_ensemble.py`](scripts/leaf_ensemble.py). The short version: dynamic per-sample routing via a regime encoder + 17 auxiliary features (FM disagreement, error correlation, ticker characteristics) + per-FM affine calibration + entropy-floor regularization + 5-seed ensemble.
 
 ---
 
@@ -27,45 +27,60 @@ How LEAF achieves this is explained in [`LEAF_IMPROVEMENT_REPORT.md`](LEAF_IMPRO
 
 ```
 fm-forecasting/
-├── README.md                       ← this file
+├── README.md
 ├── requirements.txt
-├── LEAF_IMPROVEMENT_REPORT.md      ← detailed write-up of the LEAF redesign
-├── context.md                      ← project history & session notes
+├── .gitignore
 │
-│  ── Data pipeline ──
-├── preprocess_macro.py             ← raw macro CSVs → cleaned macro panel
-├── create_panel_data.py            ← merge stock+macro into long panel
-├── create_targets_and_split.py     ← compute y_return_1d, train/val/test split
-├── feature_selection_v3_final.py
-├── check_and_fix_leakage.py
+├── MACRO_PROCESSING_GUIDE.md           ← detailed macro pipeline doc
+├── MACRO_PROCESSING_FINAL_REPORT.md
+├── MACRO_QUICK_REFERENCE.md
+├── MACRO_COMPLETED.md
 │
-│  ── Baselines ──
-├── arima_baseline_v3.py
-├── lstm_baseline_v3.py
+├── scripts/                            ← main pipeline (run these in order)
+│   │
+│   │   ── Data preprocessing ──
+│   ├── preprocess_macro.py
+│   ├── create_panel_data.py
+│   ├── create_targets_and_split.py
+│   ├── feature_selection_v3_final.py
+│   │
+│   │   ── Traditional baselines ──
+│   ├── arima_baseline_v3.py
+│   ├── lstm_baseline_v3.py
+│   │
+│   │   ── Foundation model zero-shot ──
+│   ├── timesfm_zeroshot_v3.py
+│   ├── chronos2_zeroshot_v3.py
+│   ├── moirai2_from_notebook.py
+│   │
+│   │   ── LEAF (main contribution) ──
+│   ├── leaf_ensemble.py                ← multi-seed ensemble (headline result)
+│   ├── leaf_ablation.py                ← reproduce 4 improvement rounds
+│   │
+│   │   ── Visualization ──
+│   ├── visualize_results.py
+│   │
+│   └── utils/                          ← validation / debug utilities
+│       ├── analyze_macro_vars.py
+│       ├── check_and_fix_leakage.py
+│       └── validate_macro_data.py
 │
-│  ── Foundation Model zero-shot scripts ──
-├── timesfm_zeroshot_v3.py
-├── chronos2_zeroshot_fixed.py
-├── moirai2_from_notebook.py
+├── src/                                ← support modules
+│   ├── config.py                       (constants, paths)
+│   └── data/
+│       ├── collecting/                 (raw-data fetchers from external APIs)
+│       │   ├── collect_price.py
+│       │   └── collect_vnm_etf.py
+│       └── compare_regime_features.py
 │
-│  ── LEAF ──
-├── leaf_ensemble.py                ← main LEAF training + 5-seed ensemble
-├── leaf_ablation.py                ← ablation study (4 rounds)
+├── outputs/figures/                    ← committed PNG figures
+│   ├── fig1_model_comparison.png
+│   ├── fig2_ic_heatmap.png
+│   ├── fig3_regime_weights.png
+│   ├── fig4_weight_timeline.png
+│   └── fig5_ic_per_regime.png
 │
-│  ── Visualization ──
-├── visualize_results.py            ← generate figures
-│
-├── src/                            ← modular code
-│   ├── baselines/                  (older baseline modules)
-│   ├── data/                       (feature engineering, regime detection)
-│   └── models/                     (LEAF building blocks, alt trainers)
-│
-├── data/                           ← NOT in repo — see "Data" section
-│   ├── raw/                            input CSVs (stock OHLCV, macro)
-│   ├── processed/                      panel + train/val/test splits
-│   └── results/                        predictions + summaries per model
-│
-└── outputs/figures/                ← generated PNGs (key ones may be committed)
+└── data/                               ← NOT in repo (gitignored, see below)
 ```
 
 ---
@@ -75,64 +90,64 @@ fm-forecasting/
 ### 1. Install
 
 ```bash
-# Core deps
+# Core dependencies
 pip install -r requirements.txt
 
-# Foundation models — install in a dedicated env, they have heavy deps
+# Foundation models — install separately (heavy dependencies)
 pip install timesfm
 pip install uni2ts gluonts
 pip install git+https://github.com/amazon-science/chronos-forecasting.git
 ```
 
-GPU strongly recommended for FM inference (especially Chronos-2 and Moirai-2).
+GPU strongly recommended for FM inference (Chronos-2, Moirai-2 are large models).
 
-### 2. Data
+### 2. Get the data
 
-The processed panel data (~300 MB) is **not** stored in the repo. Two options:
+The processed panel data (~300 MB) is **not** stored in the repo. You have two options:
 
-- **Regenerate from raw**: run the pipeline below, starting from `data/raw/` (stock OHLCV + macro CSVs).
-- **Download the prepared panel** (recommended for quick start): *[upload your data archive to Google Drive / Zenodo / Kaggle and link here]*.
+- **A. Download prepared data** (recommended): *[upload your data archive to Google Drive / Zenodo / Kaggle and paste the link here]*. Extract into `data/`.
+- **B. Regenerate from scratch**: run `src/data/collecting/*.py` to fetch raw data, then run the preprocessing scripts below.
 
-Expected layout once data is available:
+Expected layout once data is in place:
 
 ```
 data/
-├── raw/                                stock + macro source CSVs
+├── raw/                                stock OHLCV + macro source CSVs
 ├── processed/
 │   ├── macro/                          cleaned macro series
 │   ├── panel/
-│   │   ├── panel_train_fixed.csv       train split  (~2013–2021)
-│   │   ├── panel_val_fixed.csv         val split    (~2022–2023)
-│   │   └── panel_test_fixed.csv        test split   (2024-01-03 → 2025-12-30)
+│   │   ├── panel_train_fixed.csv       train (~2013–2021)
+│   │   ├── panel_val_fixed.csv         val   (~2022–2023)
+│   │   └── panel_test_fixed.csv        test  (2024-01-03 → 2025-12-30)
 │   └── v2/                             feature selection artifacts
 └── results/                            model outputs (created by run scripts)
 ```
 
 ### 3. Reproduce the full pipeline
 
+Each command writes to `data/results/` (predictions and per-ticker summaries) or `outputs/figures/`.
+
 ```bash
-# (a) Macro preprocessing
-python preprocess_macro.py
+# (a) Data pipeline  — skip if you downloaded prepared data
+python scripts/preprocess_macro.py
+python scripts/create_panel_data.py
+python scripts/create_targets_and_split.py
 
-# (b) Build panel & splits
-python create_panel_data.py
-python create_targets_and_split.py
+# (b) Traditional baselines
+python scripts/arima_baseline_v3.py
+python scripts/lstm_baseline_v3.py
 
-# (c) Baselines  (each writes data/results/<model>_{predictions,summary}.csv)
-python arima_baseline_v3.py
-python lstm_baseline_v3.py
+# (c) Foundation models (zero-shot, no fine-tuning)
+python scripts/timesfm_zeroshot_v3.py
+python scripts/chronos2_zeroshot_v3.py
+python scripts/moirai2_from_notebook.py
 
-# (d) Foundation models (zero-shot, no fine-tuning)
-python timesfm_zeroshot_v3.py
-python chronos2_zeroshot_fixed.py
-python moirai2_from_notebook.py
+# (d) LEAF — uses val predictions from the 3 FMs above
+python scripts/leaf_ensemble.py        # headline result (5-seed ensemble)
+python scripts/leaf_ablation.py        # reproduce 4 improvement rounds
 
-# (e) LEAF — uses val predictions from the 3 FMs above
-python leaf_ensemble.py        # produces the headline numbers
-python leaf_ablation.py        # reproduces the 4 improvement rounds
-
-# (f) Figures
-python visualize_results.py    # writes outputs/figures/*.png
+# (e) Figures
+python scripts/visualize_results.py
 ```
 
 Total runtime ~30 min on a single GPU; LEAF alone is ~3–5 min.
@@ -141,60 +156,66 @@ Total runtime ~30 min on a single GPU; LEAF alone is ~3–5 min.
 
 ## What each script does
 
-### Data pipeline
+### Data pipeline (`scripts/`)
 | Script | Purpose |
 |---|---|
 | `preprocess_macro.py` | Clean raw macro CSVs (FX, rates, foreign flows) into a unified series |
 | `create_panel_data.py` | Merge stock OHLCV + macro features into a long-format panel |
-| `create_targets_and_split.py` | Compute `y_return_1d` log returns, build train/val/test temporal splits |
+| `create_targets_and_split.py` | Compute `y_return_1d` log returns, build train/val/test splits |
 | `feature_selection_v3_final.py` | Final feature set used by multivariate models |
-| `check_and_fix_leakage.py` | Audit for lookahead leakage in features |
+| `utils/check_and_fix_leakage.py` | Audit for lookahead leakage in features |
+| `utils/analyze_macro_vars.py` | Statistical summary of macro variables |
+| `utils/validate_macro_data.py` | Sanity checks on macro CSV outputs |
 
-### Baselines
+### Baselines (`scripts/`)
 | Script | Model | IC on test |
 |---|---|---|
 | `arima_baseline_v3.py` | ARIMA(1,0,1) on returns, per-ticker | −0.023 |
 | `lstm_baseline_v3.py` | 2-layer LSTM, 8 features, early-stop on val | −0.003 |
 
-### Foundation models (zero-shot)
+### Foundation models — zero-shot (`scripts/`)
 | Script | Model | IC on test |
 |---|---|---|
 | `timesfm_zeroshot_v3.py` | Google TimesFM 1.0-200M | −0.057 |
-| `chronos2_zeroshot_fixed.py` | Amazon Chronos-2 (with covariates) | −0.056 |
+| `chronos2_zeroshot_v3.py` | Amazon Chronos-2 (with past covariates) | −0.056 |
 | `moirai2_from_notebook.py` | Salesforce Moirai-2.0-R-small (multivariate, GluonTS) | −0.071 |
 
-All three roll from start of val through end of test in one pass; train data is context only, val+test predictions are stored.
+All three roll from start of val through end of test in one pass; train is context-only; val + test predictions are stored separately.
 
-### LEAF
+### LEAF (`scripts/`)
 | Script | What it does |
 |---|---|
-| `leaf_ensemble.py` | Full LEAF: regime encoder + dynamic router + 17 aux features + per-FM calibration, trained 5 seeds and ensembled. **Run this for the headline result.** |
+| `leaf_ensemble.py` | Regime encoder + dynamic router + 17 aux features + per-FM calibration, trained over 5 seeds and ensembled. **Run this for the headline result.** |
 | `leaf_ablation.py` | Same pipeline but runs 5 variants (Round 0 baseline → Round 4 full) and prints an ablation table. Use to verify each improvement contributed. |
+
+### Data collection (`src/data/collecting/`)
+| Script | What it fetches |
+|---|---|
+| `collect_price.py` | Daily OHLCV for VN30 constituents |
+| `collect_vnm_etf.py` | VNM ETF flows |
+
+> Only the two scripts above are kept in the repo; other macro fetchers were retired. To rebuild the full macro panel you can use the prepared data link or adapt the collection scripts above.
 
 ---
 
 ## Methodology highlights
 
-- **No data leakage**: all rolling features use `.shift(1)`; scalers fit on val only; FMs are zero-shot (no training on val/test).
-- **Deterministic & reproducible**: `set_seed()` covers torch / numpy / random / cudnn; fixed seeds `[42, 123, 2024, 7, 1337]`.
-- **Same evaluation period for every model**: 416 trading days (2024-01-03 → 2025-12-30), 15 tickers, 6240 rows.
-- **LEAF training data**: FM val predictions are used to train LEAF (true out-of-sample for the FMs) — no information from test ever touches LEAF training.
-
-See [`LEAF_IMPROVEMENT_REPORT.md`](LEAF_IMPROVEMENT_REPORT.md) for the full design rationale and ablation analysis.
+- **No data leakage** — all rolling features use `.shift(1)`; scalers fit on val only; FMs are zero-shot (no training on val/test); LEAF training data = FM val predictions (true out-of-sample for the FMs).
+- **Deterministic & reproducible** — `set_seed()` covers torch / numpy / random / cudnn; fixed seeds `[42, 123, 2024, 7, 1337]`.
+- **Same evaluation period for every model** — 416 trading days, 15 tickers, 6240 rows.
+- **Multi-seed ensemble for LEAF** — single-seed IC has σ ≈ 0.028; averaging 5 seeds collapses noise and yields a deterministic, reproducible result.
 
 ---
 
-## Key figures
-
-After running `python visualize_results.py`:
+## Key figures (in `outputs/figures/`)
 
 | File | Content |
 |---|---|
-| `outputs/figures/fig1_model_comparison.png` | Bar chart of RMSE / MAE / IC / DA across all 7 models |
-| `outputs/figures/fig2_ic_heatmap.png` | Per-ticker × per-model IC heatmap |
-| `outputs/figures/fig3_regime_weights.png` | LEAF weight distribution by market regime |
-| `outputs/figures/fig4_weight_timeline.png` | LEAF weights over time, with regime background |
-| `outputs/figures/fig5_ic_per_regime.png` | IC per regime — the chart showing LEAF avoids Bear-regime collapse |
+| `fig1_model_comparison.png` | RMSE / MAE / IC / DA bar chart across all 7 models |
+| `fig2_ic_heatmap.png` | Per-ticker × per-model IC heatmap |
+| `fig3_regime_weights.png` | LEAF weight distribution by market regime |
+| `fig4_weight_timeline.png` | LEAF weights over time, with regime background |
+| `fig5_ic_per_regime.png` | IC per regime — shows LEAF avoids Bear-regime collapse |
 
 ---
 
@@ -203,13 +224,20 @@ After running `python visualize_results.py`:
 To reproduce the headline IC = **+0.0429**:
 
 1. Same Python + torch versions as `requirements.txt`.
-2. Run scripts (c)–(e) above; LEAF needs val + test prediction CSVs from all 3 FMs.
-3. `python leaf_ensemble.py` will end with:
+2. Run scripts (b)–(d) above in order; LEAF needs val + test prediction CSVs from all 3 FMs.
+3. `python scripts/leaf_ensemble.py` will end with:
    ```
    --- ensemble (avg of 5 seeds) ---
    RMSE=0.02107  MAE=0.01349  IC=+0.0429  DA=0.4731
    ```
-4. `python leaf_ablation.py` reproduces every row of the 4-round ablation table.
+4. `python scripts/leaf_ablation.py` reproduces every row of the 4-round ablation table:
+   ```
+   R0 baseline (collapse)        IC=-0.0580
+   R1 + entropy floor            IC=-0.0639
+   R2 + tracking aux (9)         IC=-0.0622
+   R3 + interact+ticker+calib    IC=+0.0092
+   R4 + 5-seed ensemble          IC=+0.0429
+   ```
 
 `cudnn.deterministic = True` + fixed `SEEDS` → byte-for-byte same output across runs on the same hardware.
 
@@ -223,13 +251,25 @@ To reproduce the headline IC = **+0.0429**:
 | ARIMA / LSTM baselines | ✅ done |
 | LEAF router + calibration + ensemble | ✅ done (headline result) |
 | Multi-seed reproducibility | ✅ done |
-| Ablation study | ✅ `leaf_ablation.py` |
+| Ablation study | ✅ `scripts/leaf_ablation.py` |
 | Walk-forward LEAF re-training | ⏳ not implemented |
 | 4th/5th base forecaster (ARIMA / LSTM in router) | ⏳ not implemented |
 | Hyper-parameter search | ⏳ not implemented |
 
 ---
 
+## Notes on data hosting
+
+Per `.gitignore`, the following are **not** tracked:
+
+- `data/` (raw + processed) — too large for GitHub, hosted externally
+- `*.csv`, `*.zip` — generated outputs or compressed archives
+- `__pycache__/`, virtual environments, IDE config
+
+If you need the prepared dataset, see the link in step 2 of Quick Start above. The repo is fully reproducible from that dataset alone — no manual data fetching required.
+
+---
+
 ## Citation / contact
 
-This work is part of a research project on foundation-model adaptation for Vietnamese equity forecasting (ViFinTSFM-LEAF framework). Open an issue or reach out if you'd like to discuss methodology or reuse the code.
+This work is part of a research project on foundation-model adaptation for Vietnamese equity forecasting. Open an issue or reach out if you'd like to discuss methodology or reuse the code.
