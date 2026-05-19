@@ -76,3 +76,4 @@ huggingface/
 # *.ipynb
 *.csv
 *.zip
+notebooks/ 
