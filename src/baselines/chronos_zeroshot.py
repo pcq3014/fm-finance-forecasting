@@ -55,18 +55,6 @@ def eval_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     return {"MAE": mae, "RMSE": rmse, "DA": da, "IC": ic}
 
 
-def add_calendar_features(df: pd.DataFrame, date_col: str = "timestamp") -> pd.DataFrame:
-    """Add calendar covariates for Chronos-2."""
-    df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col])
-    dt = df[date_col]
-    df["day_of_week"]       = dt.dt.dayofweek
-    df["quarter"]           = dt.dt.quarter
-    df["month"]             = dt.dt.month
-    df["is_derivative_exp"] = 0
-    return df
-
-
 def load_model():
     try:
         from chronos import Chronos2Pipeline
@@ -96,9 +84,6 @@ def build_context_df(all_data: pd.DataFrame, before_date: pd.Timestamp,
            .apply(lambda g: g.sort_values("timestamp").tail(context_len))
            .reset_index(drop=True)
     )
-
-    # Add calendar features
-    ctx = add_calendar_features(ctx)
 
     # Ensure sorted by id and timestamp for Chronos
     ctx = ctx.sort_values(["id", "timestamp"]).reset_index(drop=True)
@@ -190,6 +175,7 @@ def main():
                 target="Close",
                 cross_learning=True,
                 batch_size=BATCH_SIZE,
+                validate_inputs=False
             )
 
             for _, row in forecast_df.iterrows():

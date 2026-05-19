@@ -45,10 +45,23 @@ PREDICTION_LENGTH = 1   # 1-step ahead
 
 
 def eval_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    # 1. MAE và RMSE: Tính trực tiếp trên giá tuyệt đối (Close Price)
     mae  = np.mean(np.abs(y_true - y_pred))
     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-    da   = np.mean(np.sign(y_true) == np.sign(y_pred))
-    ic   = np.corrcoef(y_true, y_pred)[0, 1] if np.std(y_pred) > 0 else 0.0
+    
+    # 2. DA và IC: BẮT BUỘC phải chuyển sang sai phân (Sự thay đổi giá)
+    y_true_diff = np.diff(y_true)
+    y_pred_diff = np.diff(y_pred)
+    
+    if len(y_true_diff) > 0:
+        # Directional Accuracy: Hôm nay giá tăng/giảm, model có đoán đúng hướng không?
+        da = np.mean(np.sign(y_true_diff) == np.sign(y_pred_diff))
+        
+        # Information Coefficient: Tương quan giữa biến động thực tế và biến động dự báo
+        ic = np.corrcoef(y_true_diff, y_pred_diff)[0, 1] if np.std(y_pred_diff) > 0 else 0.0
+    else:
+        da, ic = 0.0, 0.0
+        
     return {"MAE": mae, "RMSE": rmse, "DA": da, "IC": ic}
 
 

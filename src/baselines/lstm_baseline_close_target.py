@@ -1,27 +1,22 @@
 """
-LSTM Baseline — Close Price Target (vs Log Return)
-====================================================
+LSTM Baseline — Close Price Target (Batch Walk-Forward Validation)
+==================================================================
 Input:  data/processed/v2/features_train.csv
         data/processed/v2/features_test.csv
 Output: data/results/lstm_close_results.csv
         data/results/lstm_close_summary.csv
 
-DIFFERENCE FROM lstm_baseline.py:
-  Standard LSTM:  target = ret_1d.shift(-1)  [log return]
-  This variant:   target = Close.shift(-1)   [absolute price]
-
-Architecture: Same LSTM(input=11, hidden=64, layers=2)
-Features: Same 11 engineered features (univariate vs multivariate doesn't change)
-Scaling: Close prices normalized per ticker (StandardScaler fit on train)
-
-Metric conversion:
-  pred_close (from model) → pred_return = ln(pred_close / actual_close_T)
-  Then compute MAE/RMSE/DA on return scale (for comparison with ret_1d target)
+DIFFERENCE FROM INITIAL LSTM:
+  This script uses Batch Walk-Forward Validation:
+  - Initial train on the full training set (EPOCHS).
+  - Test set is split into batches of size BATCH_DAYS.
+  - Predict the current batch using the existing model.
+  - Add the batch's actual data to the history.
+  - Fine-tune (retrain) the model for RETRAIN_EPOCHS before predicting the next batch.
 
 Purpose:
-  Compare: LSTM(target=return) vs LSTM(target=close)
-  → Validate that return target is better for financial forecasting
-  → Show non-stationarity issues with Close price prediction
+  Simulate real-world trading where models are continuously updated 
+  with new market data to adapt to changing regimes.
 """
 
 import os
@@ -47,22 +42,25 @@ TEST_PATH  = ROOT_DIR / "data" / "processed" / "v2" / "features_test.csv"
 OUT_DIR    = ROOT_DIR / "data" / "results"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-LOOKBACK    = 20
-HIDDEN_SIZE = 64
-N_LAYERS    = 2
-DROPOUT     = 0.2
-EPOCHS      = 100
-BATCH_SIZE  = 32
-LR          = 1e-3
-RANDOM_SEED = 42
-VAL_RATIO   = 0.05
-PATIENCE    = 10
-HUBER_DELTA = 0.01
+# --- HYPERPARAMETERS ---
+LOOKBACK       = 20
+HIDDEN_SIZE    = 64
+N_LAYERS       = 2
+DROPOUT        = 0.2
+EPOCHS         = 100       # Số epoch train gốc
+BATCH_SIZE     = 32
+LR             = 1e-3
+RANDOM_SEED    = 42
+VAL_RATIO      = 0.05
+PATIENCE       = 10
+HUBER_DELTA    = 0.01
+
+# --- BATCH WALK-FORWARD CONFIG ---
+BATCH_DAYS     = 50        # Số ngày dự đoán trong một lô
+RETRAIN_EPOCHS = 10        # Số epoch để fine-tune sau mỗi lô
 
 FEATURE_COLS = [
-    # OHLCV
     "Open", "High", "Low", "Close", "Volume",
-    # 11 engineered features
     "vnm_ret", "vix_dev", "risk_off_composite", "hsi_vol_20",
     "macd", "vix", "hsi_ret_1d", "pmi_norm", "ibor_rate",
     "ibor_event", "usdvnd_dev",
@@ -102,18 +100,24 @@ def make_sequences(X: np.ndarray, y: np.ndarray, lookback: int):
 def eval_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     mae  = np.mean(np.abs(y_true - y_pred))
     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-    da   = np.mean(np.sign(y_true) == np.sign(y_pred))
+    
+    # Tính Directional Accuracy (DA) trên thay đổi của giá thay vì giá trị tuyệt đối
+    y_true_diff = np.diff(y_true)
+    y_pred_diff = np.diff(y_pred)
+    if len(y_true_diff) > 0:
+        da = np.mean(np.sign(y_true_diff) == np.sign(y_pred_diff))
+    else:
+        da = 0.0
+        
     ic   = np.corrcoef(y_true, y_pred)[0, 1] if np.std(y_pred) > 0 else 0.0
     return {"MAE": mae, "RMSE": rmse, "DA": da, "IC": ic}
 
 
-def train_model(X_train: np.ndarray, y_train: np.ndarray, ticker: str) -> tuple:
+def train_model(X_train: np.ndarray, y_train: np.ndarray, ticker: str, epochs: int = EPOCHS, model: nn.Module = None) -> nn.Module:
     """
-    Train LSTM on Close price target (not return).
-    Returns: (model, close_scaler)
-
-    close_scaler: StandardScaler fit on train Close
-                  Use to inverse_transform predictions back to price scale
+    Train or fine-tune LSTM on Close price target.
+    Nếu model=None, sẽ khởi tạo model mới (cho lần học đầu).
+    Nếu model đã có, sẽ tiếp tục học trên model đó (fine-tune).
     """
     Xs, ys = make_sequences(X_train, y_train, LOOKBACK)
 
@@ -127,7 +131,9 @@ def train_model(X_train: np.ndarray, y_train: np.ndarray, ticker: str) -> tuple:
         batch_size=BATCH_SIZE, shuffle=False,
     )
 
-    model     = LSTMPredictor(len(FEATURE_COLS), HIDDEN_SIZE, N_LAYERS, DROPOUT).to(DEVICE)
+    if model is None:
+        model = LSTMPredictor(len(FEATURE_COLS), HIDDEN_SIZE, N_LAYERS, DROPOUT).to(DEVICE)
+        
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     criterion = nn.HuberLoss(delta=HUBER_DELTA)
 
@@ -135,7 +141,7 @@ def train_model(X_train: np.ndarray, y_train: np.ndarray, ticker: str) -> tuple:
     best_state     = None
     patience_count = 0
 
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         # --- Train ---
         model.train()
         epoch_loss = 0.0
@@ -155,10 +161,9 @@ def train_model(X_train: np.ndarray, y_train: np.ndarray, ticker: str) -> tuple:
             yv = torch.from_numpy(ys_val).to(DEVICE)
             val_loss = criterion(model(xv), yv).item()
 
-        if (epoch + 1) % 10 == 0:
-            print(f"    [{ticker}] Epoch {epoch+1:3d}/{EPOCHS} "
-                  f"| train={epoch_loss/len(train_loader):.6f} | val={val_loss:.6f}"
-                  f"{'  *' if val_loss < best_val_loss else ''}")
+        # Chỉ in log chi tiết nếu là quá trình học gốc (epochs == EPOCHS)
+        if epochs == EPOCHS and (epoch + 1) % 10 == 0:
+            print(f"    [{ticker}] Epoch {epoch+1:3d}/{epochs} | train={epoch_loss/len(train_loader):.6f} | val={val_loss:.6f}")
 
         # --- Early stopping ---
         if val_loss < best_val_loss:
@@ -168,7 +173,8 @@ def train_model(X_train: np.ndarray, y_train: np.ndarray, ticker: str) -> tuple:
         else:
             patience_count += 1
             if patience_count >= PATIENCE:
-                print(f"    [{ticker}] Early stop at epoch {epoch+1}")
+                if epochs == EPOCHS:
+                    print(f"    [{ticker}] Early stop at epoch {epoch+1}")
                 break
 
     # Restore best weights
@@ -179,7 +185,10 @@ def train_model(X_train: np.ndarray, y_train: np.ndarray, ticker: str) -> tuple:
 
 
 def predict(model: LSTMPredictor, X_train: np.ndarray, X_test: np.ndarray) -> np.ndarray:
-    """Predict Close prices (1-step ahead)."""
+    """Predict Close prices for a specific batch based on history."""
+    if len(X_test) == 0:
+        return np.array([])
+        
     X_ctx = np.concatenate([X_train[-LOOKBACK:], X_test], axis=0)
     dummy_y = np.zeros(len(X_ctx), dtype=np.float32)
     Xs, _  = make_sequences(X_ctx, dummy_y, LOOKBACK)
@@ -191,15 +200,16 @@ def predict(model: LSTMPredictor, X_train: np.ndarray, X_test: np.ndarray) -> np
             xb = torch.from_numpy(Xs[i:i + BATCH_SIZE]).to(DEVICE)
             preds.append(model(xb).cpu().numpy())
 
+    if len(preds) == 0:
+        return np.array([])
+        
     return np.concatenate(preds)[:len(X_test)]
 
 
 def main():
     print("=" * 60)
-    print(f"LSTM BASELINE — CLOSE PRICE TARGET | device={DEVICE}")
-    print(f"Lookback={LOOKBACK} | Hidden={HIDDEN_SIZE} | Layers={N_LAYERS} | Epochs={EPOCHS}")
-    print(f"Features ({len(FEATURE_COLS)}): {FEATURE_COLS}")
-    print(f"\nNOTE: Predicting Close price, converting to return for metrics")
+    print(f"LSTM BASELINE — CLOSE TARGET (BATCH WALK-FORWARD)")
+    print(f"Device: {DEVICE} | Batch size: {BATCH_DAYS} days | Retrain Epochs: {RETRAIN_EPOCHS}")
     print("=" * 60)
 
     # --- Load ---
@@ -217,30 +227,62 @@ def main():
         tr = train[train["ticker"] == ticker].sort_values("Date")
         te = test[test["ticker"]  == ticker].sort_values("Date")
 
-        X_train = tr[FEATURE_COLS].values.astype(np.float32)
-        y_train_close = tr["Close"].values.astype(np.float32)  # ← Close price target
-        y_train_ret = tr["target"].values.astype(np.float32)   # ← For comparison
-
-        X_test  = te[FEATURE_COLS].values.astype(np.float32)
-        y_test_ret = te["target"].values.astype(np.float32)    # ← Evaluate on return
+        # Khởi tạo data gốc từ Train Set
+        X_train_base = tr[FEATURE_COLS].values.astype(np.float32)
+        y_train_base = tr["Close"].values.astype(np.float32)
 
         print(f"\n{'='*40}")
-        print(f"[{ticker}] train={len(tr)} | test={len(te)}")
+        print(f"[{ticker}] Initial Train={len(tr)} | Test={len(te)}")
 
-        # Train on Close price
-        model = train_model(X_train, y_train_close, ticker)
+        # 1. TRAIN BAN ĐẦU (Học trên toàn bộ tập Train)
+        model = train_model(X_train_base, y_train_base, ticker, epochs=EPOCHS, model=None)
 
-        # Predict Close price
-        preds_close = predict(model, X_train, X_test)
+        # 2. BATCH WALK-FORWARD TRÊN TẬP TEST
+        unique_dates = sorted(te["Date"].unique())
+        n_batches = (len(unique_dates) + BATCH_DAYS - 1) // BATCH_DAYS
+        
+        # Biến chứa dữ liệu lịch sử được cộng dồn sau mỗi batch
+        X_train_current = X_train_base.copy()
+        y_train_current = y_train_base.copy()
+        
+        preds_all = []
+        
+        for batch_idx in range(n_batches):
+            batch_start_idx = batch_idx * BATCH_DAYS
+            batch_end_idx = min(batch_start_idx + BATCH_DAYS, len(unique_dates))
+            batch_dates = unique_dates[batch_start_idx:batch_end_idx]
+            
+            # Trích xuất data của batch này
+            mask = te["Date"].isin(batch_dates)
+            X_test_batch = te.loc[mask, FEATURE_COLS].values.astype(np.float32)
+            y_test_batch = te.loc[mask, "Close"].values.astype(np.float32)
+            
+            if len(X_test_batch) == 0:
+                continue
+                
+            # A. Dự báo lô hiện tại bằng model ĐANG CÓ (chưa thấy data của lô này)
+            batch_preds = predict(model, X_train_current, X_test_batch)
+            preds_all.extend(batch_preds)
+            
+            # B. Nạp data thực tế của lô này vào lịch sử (Mô hình bắt đầu "nhìn thấy" lô này)
+            X_train_current = np.concatenate([X_train_current, X_test_batch], axis=0)
+            y_train_current = np.concatenate([y_train_current, y_test_batch], axis=0)
+            
+            # C. Fine-tune model chuẩn bị cho lô tiếp theo (bỏ qua nếu đây là lô cuối)
+            if batch_idx < n_batches - 1:
+                print(f"    [{ticker}] Fine-tuning model (Batch {batch_idx+1}/{n_batches}, History size: {len(X_train_current)})...")
+                model = train_model(X_train_current, y_train_current, ticker, epochs=RETRAIN_EPOCHS, model=model)
 
-        # Evaluate on Close scale
+        # 3. ĐÁNH GIÁ VÀ LƯU KẾT QUẢ
+        preds_close = np.array(preds_all)
         close_actual_test = te["Close"].values
+
         m = eval_metrics(close_actual_test, preds_close)
         print(f"  -> MAE={m['MAE']:.6f} | RMSE={m['RMSE']:.6f} | DA={m['DA']:.3f} | IC={m['IC']:.4f}")
 
         df_pred = te[["Date", "ticker", "regime_hmm"]].copy()
         df_pred["target"] = close_actual_test
-        df_pred["pred"] = preds_close  # ← store close prediction
+        df_pred["pred"] = preds_close  
         all_preds.append(df_pred)
         summary_rows.append({"ticker": ticker, **m})
 
@@ -253,7 +295,7 @@ def main():
     summary.to_csv(OUT_DIR / "lstm_close_summary.csv", index=False)
 
     print("\n" + "=" * 60)
-    print("LSTM (CLOSE TARGET) — OVERALL METRICS")
+    print("LSTM (BATCH WALK-FORWARD) — OVERALL METRICS")
     print("=" * 60)
     print(summary.round(6).to_string(index=False))
 
@@ -268,12 +310,6 @@ def main():
 
     print(f"\nSaved: {OUT_DIR / 'lstm_close_results.csv'}")
     print(f"Saved: {OUT_DIR / 'lstm_close_summary.csv'}")
-
-    print("\n" + "=" * 60)
-    print("COMPARISON: Return Target vs Close Target")
-    print("=" * 60)
-    print("Load results/lstm_summary.csv and results/lstm_close_summary.csv")
-    print("Side-by-side compare OVERALL metrics to validate target choice")
 
 
 if __name__ == "__main__":

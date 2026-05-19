@@ -13,7 +13,9 @@ Model: ARIMA(1,0,1) per ticker on Close prices (NOT returns).
        After forecasting Close prices, convert to returns for metrics:
        pred_ret = ln(pred_close_t / close_{t-1})
 
-Forecast strategy: fit on full train, one-shot forecast over test horizon.
+Forecast strategy: Batch walk-forward validation (like Chronos-2).
+                   Chia test set thành batch, mỗi batch fit trên history
+                   (train + ngày trước batch), dự báo toàn batch cùng lúc.
 Metrics: Evaluated on return scale (same as LSTM, FM models).
 """
 
@@ -34,39 +36,97 @@ TEST_PATH  = ROOT_DIR / "data" / "processed" / "v2" / "features_test.csv"
 OUT_DIR    = ROOT_DIR / "data" / "results"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-ARIMA_ORDER = (1, 0, 1)
+ARIMA_ORDER = (1, 1, 1)
+BATCH_DAYS  = 50  # Batch walk-forward: predict 50 test days at once
 
 
 def eval_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    # MAE và RMSE vẫn tính trên giá trị tuyệt đối để đo lường khoảng cách
     mae  = np.mean(np.abs(y_true - y_pred))
     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-    da   = np.mean(np.sign(y_true) == np.sign(y_pred))
-    ic   = np.corrcoef(y_true, y_pred)[0, 1] if np.std(y_pred) > 0 else 0.0
+    
+    # Tính DA và IC trên sai phân (sự thay đổi so với bước trước đó)
+    y_true_diff = np.diff(y_true)
+    y_pred_diff = np.diff(y_pred)
+    
+    if len(y_true_diff) > 0:
+        # Hôm nay giá thực tế tăng/giảm, mô hình có đoán đúng hướng đó không?
+        da = np.mean(np.sign(y_true_diff) == np.sign(y_pred_diff))
+        
+        # Mức độ tương quan giữa biến động thực tế và biến động dự báo
+        ic = np.corrcoef(y_true_diff, y_pred_diff)[0, 1] if np.std(y_pred_diff) > 0 else 0.0
+    else:
+        da, ic = 0.0, 0.0
+        
     return {"MAE": mae, "RMSE": rmse, "DA": da, "IC": ic}
 
 
-def forecast_arima_close(train_close: np.ndarray, n_steps: int, ticker: str) -> np.ndarray:
+def forecast_arima_batch_rolling(train_close: np.ndarray, test_close: np.ndarray, 
+                                  test_dates: np.ndarray, ticker: str) -> np.ndarray:
     """
-    Train ARIMA on Close price.
-    Returns predicted Close prices (not converted to return).
+    Batch walk-forward validation for ARIMA.
+    
+    Chia test set thành batch, mỗi batch:
+      1. Fit ARIMA trên history (train + ngày trước batch)
+      2. Dự báo toàn batch cùng lúc (prediction_length = batch_size)
+      3. Batch kế tiếp rebuild history với dữ liệu thực tế trước batch
     """
-    try:
-        # Fit ARIMA on Close prices
-        model  = ARIMA(train_close, order=ARIMA_ORDER)
-        fitted = model.fit()
-
-        # Forecast next n_steps Close prices
-        preds_close = fitted.forecast(steps=n_steps)
-
-        return np.array(preds_close)
-    except Exception as e:
-        print(f"  [{ticker}] ARIMA failed ({e}) -> zero forecast")
-        return np.zeros(n_steps)
+    n_test = len(test_close)
+    preds_all = np.zeros(n_test)
+    
+    # Get unique test dates to create batches
+    unique_dates = sorted(np.unique(test_dates))
+    n_batches = (len(unique_dates) + BATCH_DAYS - 1) // BATCH_DAYS
+    
+    for batch_idx in range(n_batches):
+        batch_start_idx = batch_idx * BATCH_DAYS
+        batch_end_idx = min(batch_start_idx + BATCH_DAYS, len(unique_dates))
+        batch_dates = unique_dates[batch_start_idx:batch_end_idx]
+        batch_size = len(batch_dates)
+        
+        # Tìm indices của test set tương ứng với batch_dates này
+        batch_test_indices = []
+        for date in batch_dates:
+            idx_list = np.where(test_dates == date)[0]
+            if len(idx_list) > 0:
+                batch_test_indices.append(idx_list[0])
+        
+        if len(batch_test_indices) == 0:
+            continue
+        
+        batch_test_indices = sorted(batch_test_indices)
+        
+        # Rebuild history: train + các ngày test trước batch
+        history = list(train_close)
+        for idx in range(len(test_close)):
+            if idx < batch_test_indices[0]:
+                history.append(test_close[idx])
+        
+        try:
+            # Fit ARIMA trên history hiện có
+            model = ARIMA(history, order=ARIMA_ORDER)
+            fitted = model.fit()
+            
+            # Dự báo batch_size bước
+            batch_preds = fitted.forecast(steps=batch_size)
+            
+            # Assign predictions cho các indices trong batch
+            for i, idx in enumerate(batch_test_indices):
+                if i < len(batch_preds):
+                    preds_all[idx] = batch_preds[i]
+                    
+        except Exception as e:
+            print(f"    [{ticker}] ARIMA batch {batch_idx} failed ({e}) -> zero pred")
+            for idx in batch_test_indices:
+                preds_all[idx] = 0.0
+    
+    return preds_all
 
 
 def main():
     print("=" * 60)
-    print(f"ARIMA BASELINE — ARIMA{ARIMA_ORDER}")
+    print(f"ARIMA BASELINE — ARIMA{ARIMA_ORDER} (BATCH WALK-FORWARD)")
+    print(f"Batch size: {BATCH_DAYS} days")
     print("=" * 60)
 
     train = pd.read_csv(TRAIN_PATH, parse_dates=["Date"])
@@ -85,9 +145,12 @@ def main():
 
         train_close = tr["Close"].values  # ← Close prices
         test_close  = te["Close"].values  # ← Actual Close prices for evaluation
+        test_dates  = te["Date"].values   # ← Test dates for batch alignment
 
         print(f"[{ticker}] train={len(train_close)} | test={len(test_close)}", end="  ->  ")
-        preds = forecast_arima_close(train_close, len(test_close), ticker)
+        
+        # Batch walk-forward forecast
+        preds = forecast_arima_batch_rolling(train_close, test_close, test_dates, ticker)
 
         m = eval_metrics(test_close, preds)
         print(f"MAE={m['MAE']:.6f} | RMSE={m['RMSE']:.6f} | DA={m['DA']:.3f} | IC={m['IC']:.4f}")

@@ -1,0 +1,75 @@
+[FEATURE SELECTION V3 - TOM TAT NHANH]
+
+====== DU LIEU DAU VAO ======
+- Tong so bien: 51 dac trung
+- Mau du lieu training: 28,183
+- Bien muc tieu: y_return_1d = ln(Close[t+1]/Close[t]) - Log Return
+
+====== 3 BUOC XU LY ======
+
+[BUOC 1: Low Variance Filter]
+- Thua: 25/51 dac trung (co phuong sai > median = 1.004)
+- Loai: 26/51 dac trung
+
+[BUOC 2: Correlation Filter]
+  2a. Tuong quan voi target: 48/51 dac trung (|corr| > 0.00187)
+  2b. Loai da cong tuyen: -10 dac trung
+  -> Ket qua: 38/51 dac trung
+
+[BUOC 3: Mutual Information Filter]
+- Thua: 25/51 dac trung (MI > 0.0676)
+- Loai: 26/51 dac trung
+
+====== HE THONG BINH CHON ======
+Votes = 3 (vung qua 3 phuong phap): 8 dac trung
+Votes = 2 (vung qua 2 phuong phap): 27 dac trung
+Votes = 1 (vung qua 1 phuong phap): 10 dac trung
+Votes = 0 (khong vung phuong phap): 6 dac trung
+
+====== KET QUA CUOI CUNG ======
+
+[PHUONG AN 1: MULTIVARIATE FM (8 dac trung) - CHINH]
+Dung cho: Chronos-2-M, Moirai-2-M, TimesFM-M
+
+1. vn30_volume             (votes=3, corr=0.0219, MI=0.0678)
+2. volume_ma20             (votes=3, corr=0.0175, MI=0.0777)
+3. trading_value_ma20      (votes=3, corr=0.0080, MI=0.0904)
+4. vn30_close              (votes=3, corr=0.0041, MI=0.1069)
+5. vnm_ret_lag1            (votes=3, corr=0.0370, MI=0.0723)
+6. foreign_sell_value      (votes=3, corr=0.0114, MI=0.0787)
+7. hsi_close               (votes=3, corr=0.0108, MI=0.0827)
+8. vn30_vol_5d             (votes=3, corr=0.0134, MI=0.0760)
+
+[PHUONG AN 2: LEAF CONTEXT (15 dac trung)]
+Dung cho: LEAF regime encoder
+
+[8 dac trung tren] +
+9.  vnm_close              (votes=2)
+10. close_ret_1d           (votes=2) [MOMENTUM]
+11. vol_5d                 (votes=2)
+12. vix                    (votes=2)
+13. trading_value_log      (votes=2)
+14. vnindex_volume         (votes=2)
+15. vnindex_close          (votes=2)
+
+====== GIAI THICH CHINH ======
+
+Tai sao giu log_ret_1d va close_ret_1d (MI = 0.45)?
+-> Khong phai leakage! Tuy MI cao nhung tương quan chi 0.0097
+-> Tín hieu momentum hop le: yesterday's return can predict today's return
+-> Cac bien tren cac ngay khac nhau, khong co future information
+
+Tai sao tuong quan toan bo deu nho (< 0.10)?
+-> Thi truong chung khoan la phuc tap, co thanh phan ngau nhien
+-> Quan he phi tuyen manh (captured by MI and tree-based models)
+
+====== VAN DE DUOC GIAI QUYET ======
+✓ Khong leakage: corr(log_ret_1d[t], target[t]) = 0.0097
+✓ Target la log return (nhat qua toan hoc)
+✓ 8 dac trung votes=3 la kem chat (vung qua 3 phuong phap)
+✓ San sang train Foundation Models
+
+====== FILE LUU LAI ======
+outputs/feature_selection_v3/feature_selection_summary_v3.csv
+outputs/feature_selection_v3/selected_features_v3.txt
+outputs/feature_selection_v3/feature_selection_v3.png
