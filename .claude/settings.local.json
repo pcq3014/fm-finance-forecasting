@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(cd d:\\\\fm-forecasting; $env:PYTHONIOENCODING=\"utf-8\"; C:\\\\Users\\\\admin\\\\miniconda3\\\\envs\\\\env_core\\\\python.exe -m src.data.feature_engineering 2>&1)",
-      "Bash(python)"
-    ]
-  }
-}

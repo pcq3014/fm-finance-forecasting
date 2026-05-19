@@ -1,7 +1,0 @@
-variant,regime_label,n_days,pct,ret_annual_pct,vol_annual_pct,sharpe_daily
-A,Bull,977,30.3,29.29,12.22,0.151
-A,Sideways,956,29.6,15.89,12.84,0.078
-A,Bear,1292,40.1,2.87,27.56,0.007
-B,Bull,1573,48.8,21.97,11.78,0.117
-B,Sideways,1016,31.5,22.5,18.85,0.075
-B,Bear,636,19.7,-15.56,33.27,-0.029

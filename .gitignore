@@ -1,2 +1,78 @@
-venv/
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# ─── Virtual environments ───
+venv/
+env/
+.venv/
+envs/
+ENV/
+
+# ─── Jupyter ───
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ─── IDE / editors ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ───
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Project-specific (personal / local) ───
+.claude/
+.aider*
+*.log
+leaf_training.log
+
+# ─── Big data (regenerable / hosted externally) ───
+data/processed/
+data/raw/
+data/macro/
+data/coveraties/
+data/results/
+data/ibor_rate.csv
+*.zip
+data.zip
+macro_dataset.zip
+
+# ─── Model weights / checkpoints ───
+models/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# ─── Generated outputs (selectively keep — uncomment to ignore) ───
+outputs/feature_selection/
+outputs/feature_selection_v2/
+outputs/feature_selection_v3/
+outputs/feature_visualization/
+# outputs/figures/    # keep committed for README display
+
+# ─── HuggingFace cache ───
+.cache/
+huggingface/
+
+# ─── Notebooks with cell outputs ───
+# Uncomment to ignore notebooks entirely:
+# *.ipynb
+*.csv
+*.zip
