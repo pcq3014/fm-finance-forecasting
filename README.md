@@ -274,4 +274,4 @@ If you need the prepared dataset, see the link in step 2 of Quick Start above. T
 
 Team research project (VinUni AI program): foundation-model adaptation for Vietnamese equity forecasting. Not yet peer-reviewed. Open an issue to discuss methodology or reuse the code.
 
-Author: Phạm Cường Quốc ([@pcq3014](https://github.com/pcq3014)) — add co-authors here.
+Authors: Phạm Cường Quốc ([@pcq3014](https://github.com/pcq3014)), Nguyễn Hải Nam ([@namhaing](https://github.com/namhaing)), Đỗ Ngọc Phi ([@phido0410](https://github.com/phido0410)).
