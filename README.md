@@ -7,7 +7,7 @@
 
 ## Headline result
 
-LEAF beats every baseline on every metric on the full test set (2024-01-03 → 2025-12-30, 15 tickers × 416 days = 6240 rows), and is the **only model with positive Information Coefficient** despite being built from three FMs that are all individually negative-IC on this period.
+LEAF has the best RMSE, MAE and IC on the full test set (2024-01-03 → 2025-12-30, 15 tickers × 416 days = 6240 rows), and is the **only model with positive Information Coefficient** despite being built from three FMs that are all individually negative-IC on this period. Directional accuracy is on par with ARIMA (0.4731 vs 0.4739) and below 50% for every model, so the gain is a small, honest improvement in ranking signal, not a trading-ready edge.
 
 | Model | RMSE ↓ | MAE ↓ | IC ↑ | DA ↑ |
 |---|---|---|---|---|
@@ -272,4 +272,6 @@ If you need the prepared dataset, see the link in step 2 of Quick Start above. T
 
 ## Citation / contact
 
-This work is part of a research project on foundation-model adaptation for Vietnamese equity forecasting. Open an issue or reach out if you'd like to discuss methodology or reuse the code.
+Team research project (VinUni AI program): foundation-model adaptation for Vietnamese equity forecasting. Not yet peer-reviewed. Open an issue to discuss methodology or reuse the code.
+
+Author: Phạm Cường Quốc ([@pcq3014](https://github.com/pcq3014)) — add co-authors here.
